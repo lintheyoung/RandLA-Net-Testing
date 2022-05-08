@@ -4,7 +4,7 @@ import pickle
 import argparse
 import numpy as np
 from os.path import join, exists
-from sklearn.neighbors import KDTree
+from sklearn.neighbors import KDTree, _dist_metrics
 from utils.data_process import DataProcessing as DP
 
 parser = argparse.ArgumentParser()

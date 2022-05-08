@@ -5,6 +5,7 @@ import warnings
 import argparse
 import numpy as np
 from tqdm import tqdm
+from dataset.semkitti_trainset import SemanticKITTI
 # torch
 import torch
 import torch.nn as nn
@@ -12,12 +13,12 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 # my module
-from dataset.semkitti_trainset import SemanticKITTI
 from utils.config import ConfigSemanticKITTI as cfg
 from utils.metric import compute_acc, IoUCalculator
 from network.RandLANet import Network
 from network.loss_func import compute_loss
 
+torch.backends.cudnn.enabled = False
 
 warnings.filterwarnings("ignore")
 parser = argparse.ArgumentParser()
