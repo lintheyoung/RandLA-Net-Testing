@@ -1,42 +1,47 @@
+from mimetypes import init
+from xml.sax.handler import feature_external_ges
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import network.pytorch_utils as pt_utils
 from network.transformer import TransformerBlock
 
-nneighbor_0 = 32 # 最好是改成32
-transformer_dim_0 = 1024
-
-nneighbor_1 = 16 
-transformer_dim_1 = 512
+nneighbor = 16
+transformer_dim = 1024
 
 class Network(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         self.config = config
-
+        # 输入是由三个通道，然后被mlp变成8个通道
         self.fc0 = pt_utils.Conv1d(3, 8, kernel_size=1, bn=True)
-
-        # 输入-输出维度
-        self.fc_to_3_0 = pt_utils.Conv1d(256, 3, kernel_size=1, bn=True)
-        self.transformer_after_sample_0 = TransformerBlock(256, transformer_dim_0, nneighbor_0)
-
-        # 输入-输出维度
-        self.fc_to_3_1 = pt_utils.Conv1d(512, 3, kernel_size=1, bn=True)
-        self.transformer_after_sample_1 = TransformerBlock(512, transformer_dim_1, nneighbor_1)
+        self.fc_test = pt_utils.Conv1d(256, 3, kernel_size=1, bn=True)
+        # 输出是8个通道
+        self.transformer_fc0 = TransformerBlock(32, transformer_dim, nneighbor)
+        self.transformer_test_0 = TransformerBlock(256, transformer_dim, nneighbor)
+        self.transformer_test_1 = TransformerBlock(512, transformer_dim, nneighbor)
 
         self.dilated_res_blocks = nn.ModuleList()
+        self.transformer_dilated_res_blocks = nn.ModuleList()
+        # 输入是有8个通道
+        # 前面应该是encoder部分
+        # 因为只有encorder才需要降维
         d_in = 8
         for i in range(self.config.num_layers):
             d_out = self.config.d_out[i]
             self.dilated_res_blocks.append(Dilated_res_block(d_in, d_out))
+            self.transformer_dilated_res_blocks.append(TransformerBlock(d_out, transformer_dim, nneighbor))
             d_in = 2 * d_out
 
         d_out = d_in
+        # 应该是中间的MLP部分
         self.decoder_0 = pt_utils.Conv2d(d_in, d_out, kernel_size=(1, 1), bn=True)
-
+        self.transformer_decoder_0 = TransformerBlock(d_out, transformer_dim, nneighbor)
+        # 其中的Encoder部分
         self.decoder_blocks = nn.ModuleList()
+        self.transformer_decoder_blocks = nn.ModuleList()
+        # 
         for j in range(self.config.num_layers):
             if j < 3:
                 d_in = d_out + 2 * self.config.d_out[-j-2]
@@ -45,20 +50,48 @@ class Network(nn.Module):
                 d_in = 4 * self.config.d_out[-4]
                 d_out = 2 * self.config.d_out[-4]
             self.decoder_blocks.append(pt_utils.Conv2d(d_in, d_out, kernel_size=(1, 1), bn=True))
-
+            self.transformer_decoder_blocks.append(TransformerBlock(d_out, transformer_dim, nneighbor))
+        # 对应其中尾部的fc1
         self.fc1 = pt_utils.Conv2d(d_out, 64, kernel_size=(1, 1), bn=True)
+        self.transformer_fc1 = TransformerBlock(64, transformer_dim, nneighbor)
+        # fc2
         self.fc2 = pt_utils.Conv2d(64, 32, kernel_size=(1, 1), bn=True)
+        self.transformer_fc2 = TransformerBlock(32, transformer_dim, nneighbor)
+        # 还需要经过一次drop out
+        # 要在drop out前还是后需要再测试
         self.dropout = nn.Dropout(0.5)
+        # 最后一层fc3
         self.fc3 = pt_utils.Conv2d(32, self.config.num_classes, kernel_size=(1, 1), bn=False, activation=None)
 
+    # 我的目标还是对其中的feature作类似萃取的工作
     def forward(self, end_points):
+        # 获得点云
         features = end_points['features']  # Batch*channel*npoints
+        # print(features.permute(0, 2, 1).size())
+        # input("features_0 = ")
+        # 
         features = self.fc0(features)
-
+        # print(features.permute(0, 2, 1).size())
+        # input("features_1 = ")
+        # 就是先做升维，后面再变成类似点的模样
         features = features.unsqueeze(dim=3)  # Batch*channel*npoints*1
+        # print(features.permute(0, 2, 1, 3).size())
+        # input("features_2 = ")
+        # 能够把加入的维度给去掉
+        # test_features = features.squeeze()
+        # print(test_features.permute(0, 2, 1).size())
+        # input("test_features = ")
 
         # ###########################Encoder############################
         f_encoder_list = []
+        # for i in range(self.config.num_layers):
+        #     f_encoder_i = self.dilated_res_blocks[i](features, end_points['xyz'][i], end_points['neigh_idx'][i])
+
+        #     f_sampled_i = self.random_sample(f_encoder_i, end_points['sub_idx'][i])
+        #     features = f_sampled_i
+        #     if i == 0:
+        #         f_encoder_list.append(f_encoder_i)
+        #     f_encoder_list.append(f_sampled_i)
 
         # i = 0
         f_encoder_i = self.dilated_res_blocks[0](features, end_points['xyz'][0], end_points['neigh_idx'][0])
@@ -75,83 +108,60 @@ class Network(nn.Module):
 
         # i = 2
         f_encoder_i = self.dilated_res_blocks[2](features, end_points['xyz'][2], end_points['neigh_idx'][2])
+        # print("size2 = ", f_encoder_i.size())
+        # input()
+
+        # # transformer计算
+        # init_xyz = self.fc_test(f_encoder_i.squeeze(-1))
+        # # print("size1 = ", init_xyz.size())
+        # # input()
+        # init_xyz = init_xyz.permute(0, 2, 1)
+        # print("size2 = ", init_xyz.size())
+        # input()
+        # input_feature = f_encoder_i.squeeze(-1).permute(0, 2, 1)
+        # output_feature = self.transformer_test_0(init_xyz, input_feature)[0]
+        # # print(output_feature.size())
+        # # input("see the size")
+        # f_encoder_i = output_feature.permute(0, 2, 1).unsqueeze(3)
+        
         f_sampled_i = self.random_sample(f_encoder_i, end_points['sub_idx'][2])
 
-        # transformer计算
-        init_xyz = self.fc_to_3_0(f_sampled_i.squeeze(-1))
-        init_xyz = init_xyz.permute(0, 2, 1)
-        input_feature = f_sampled_i.squeeze(-1).permute(0, 2, 1)
-        output_feature = self.transformer_after_sample_0(init_xyz, input_feature)[0]
-        f_sampled_i = output_feature.permute(0, 2, 1).unsqueeze(3)
+        # # transformer计算
+        # init_xyz = self.fc_test(f_sampled_i.squeeze(-1))
+        # # print("size1 = ", init_xyz.size())
+        # # input()
+        # init_xyz = init_xyz.permute(0, 2, 1)
+        # # print("size2 = ", init_xyz.size())
+        # # input()
+        # input_feature = f_sampled_i.squeeze(-1).permute(0, 2, 1)
+        # output_feature = self.transformer_test_0(init_xyz, input_feature)[0]
+        # # print(output_feature.size())
+        # # input("see the size")
+        # f_sampled_i = output_feature.permute(0, 2, 1).unsqueeze(3)
 
+        # print("size3 = ", f_sampled_i.size())
+        # input()
+        # 后面可以再做一层tf
         features = f_sampled_i
         f_encoder_list.append(f_sampled_i)
 
         # i = 3
         f_encoder_i = self.dilated_res_blocks[3](features, end_points['xyz'][3], end_points['neigh_idx'][3])
         f_sampled_i = self.random_sample(f_encoder_i, end_points['sub_idx'][3])
-
-        # transformer计算
-        init_xyz = self.fc_to_3_1(f_sampled_i.squeeze(-1))
-        init_xyz = init_xyz.permute(0, 2, 1)
-        input_feature = f_sampled_i.squeeze(-1).permute(0, 2, 1)
-        output_feature = self.transformer_after_sample_1(init_xyz, input_feature)[0]
-        f_sampled_i = output_feature.permute(0, 2, 1).unsqueeze(3)
-
         features = f_sampled_i
         f_encoder_list.append(f_sampled_i)
         # ###########################Encoder############################
 
         features = self.decoder_0(f_encoder_list[-1])
-        # transformer计算
-        init_xyz = self.fc_to_3_1(features.squeeze(-1))
-        init_xyz = init_xyz.permute(0, 2, 1)
-        input_feature = features.squeeze(-1).permute(0, 2, 1)
-        output_feature = self.transformer_after_sample_1(init_xyz, input_feature)[0]
-        features = output_feature.permute(0, 2, 1).unsqueeze(3)
 
         # ###########################Decoder############################
-        # 还是在最开始的两层加入transformer结构
         f_decoder_list = []
-        # for j in range(self.config.num_layers):
-        #     f_interp_i = self.nearest_interpolation(features, end_points['interp_idx'][-j - 1])
-        #     f_decoder_i = self.decoder_blocks[j](torch.cat([f_encoder_list[-j - 2], f_interp_i], dim=1))
+        for j in range(self.config.num_layers):
+            f_interp_i = self.nearest_interpolation(features, end_points['interp_idx'][-j - 1])
+            f_decoder_i = self.decoder_blocks[j](torch.cat([f_encoder_list[-j - 2], f_interp_i], dim=1))
 
-        #     features = f_decoder_i
-        #     f_decoder_list.append(f_decoder_i)
-
-        # j = 0
-        f_interp_i = self.nearest_interpolation(features, end_points['interp_idx'][-0 - 1])
-        f_decoder_i = self.decoder_blocks[0](torch.cat([f_encoder_list[-0 - 2], f_interp_i], dim=1))
-        # 再经过一层上采样之后
-
-        # transformer计算
-        init_xyz = self.fc_to_3_0(f_decoder_i.squeeze(-1))
-        init_xyz = init_xyz.permute(0, 2, 1)
-        input_feature = f_decoder_i.squeeze(-1).permute(0, 2, 1)
-        output_feature = self.transformer_after_sample_0(init_xyz, input_feature)[0]
-        f_decoder_i = output_feature.permute(0, 2, 1).unsqueeze(3)
-
-        features = f_decoder_i
-        f_decoder_list.append(f_decoder_i)
-
-        # j = 1
-        f_interp_i = self.nearest_interpolation(features, end_points['interp_idx'][-1 - 1])
-        f_decoder_i = self.decoder_blocks[1](torch.cat([f_encoder_list[-1 - 2], f_interp_i], dim=1))
-        features = f_decoder_i
-        f_decoder_list.append(f_decoder_i)
-
-        # j = 2
-        f_interp_i = self.nearest_interpolation(features, end_points['interp_idx'][-2 - 1])
-        f_decoder_i = self.decoder_blocks[2](torch.cat([f_encoder_list[-2 - 2], f_interp_i], dim=1))
-        features = f_decoder_i
-        f_decoder_list.append(f_decoder_i)
-
-        # j = 2
-        f_interp_i = self.nearest_interpolation(features, end_points['interp_idx'][-3 - 1])
-        f_decoder_i = self.decoder_blocks[3](torch.cat([f_encoder_list[-3 - 2], f_interp_i], dim=1))
-        features = f_decoder_i
-        f_decoder_list.append(f_decoder_i)
+            features = f_decoder_i
+            f_decoder_list.append(f_decoder_i)
         # ###########################Decoder############################
 
         features = self.fc1(features)
@@ -195,7 +205,7 @@ class Network(nn.Module):
         interpolated_features = interpolated_features.unsqueeze(3)  # batch*channel*npoints*1
         return interpolated_features
 
-
+#第三部分的建立
 class Dilated_res_block(nn.Module):
     def __init__(self, d_in, d_out):
         super().__init__()
@@ -206,9 +216,14 @@ class Dilated_res_block(nn.Module):
         self.shortcut = pt_utils.Conv2d(d_in, d_out*2, kernel_size=(1, 1), bn=True, activation=None)
 
     def forward(self, feature, xyz, neigh_idx):
+        # 输入的是特征feature就是f
+        # 先是经过一个MLP
         f_pc = self.mlp1(feature)  # Batch*channel*npoints*1
+        # 就是中间的LocSE+AttPool+LosSE+AttPool
         f_pc = self.lfa(xyz, f_pc, neigh_idx)  # Batch*d_out*npoints*1
+        # 再经过一个MLP层
         f_pc = self.mlp2(f_pc)
+        # 经过short cut连接
         shortcut = self.shortcut(feature)
         return F.leaky_relu(f_pc+shortcut, negative_slope=0.2)
 
@@ -263,6 +278,7 @@ class Building_block(nn.Module):
         return features
 
 
+ # 其中的第二部分
 class Att_pooling(nn.Module):
     def __init__(self, d_in, d_out):
         super().__init__()
@@ -270,10 +286,11 @@ class Att_pooling(nn.Module):
         self.mlp = pt_utils.Conv2d(d_in, d_out, kernel_size=(1, 1), bn=True)
 
     def forward(self, feature_set):
-
+        #计算其中的attention机制
         att_activation = self.fc(feature_set)
         att_scores = F.softmax(att_activation, dim=3)
         f_agg = feature_set * att_scores
         f_agg = torch.sum(f_agg, dim=3, keepdim=True)
+        # 在相乘之后再经过一个mlp
         f_agg = self.mlp(f_agg)
         return f_agg

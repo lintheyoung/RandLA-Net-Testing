@@ -25,7 +25,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
 parser.add_argument('--log_dir', default='log', help='Dump dir to save model checkpoint [default: log]')
 parser.add_argument('--max_epoch', type=int, default=100, help='Epoch to run [default: 100]')
-parser.add_argument('--batch_size', type=int, default=4, help='Batch Size during training [default: 5]')
+parser.add_argument('--batch_size', type=int, default=1, help='Batch Size during training [default: 5]')
 parser.add_argument('--val_batch_size', type=int, default=6, help='Batch Size during training [default: 30]')
 parser.add_argument('--num_workers', type=int, default=4, help='Number of workers [default: 5]')
 FLAGS = parser.parse_args()
@@ -107,6 +107,8 @@ class Trainer:
         self.val_dataset = val_dataset
 
     def train_one_epoch(self):
+        train_loss_sum = 0
+        train_loss_times = 0
         self.net.train()  # set model to training mode
         tqdm_loader = tqdm(self.train_loader, total=len(self.train_loader))
         for batch_idx, batch_data in enumerate(tqdm_loader):
@@ -122,9 +124,12 @@ class Trainer:
             torch.cuda.synchronize()
             end_points = self.net(batch_data)
             loss, end_points = compute_loss(end_points, self.train_dataset, self.criterion)
+            
+            train_loss_sum += loss.item()
+            train_loss_times += 1
             loss.backward()
             self.optimizer.step()
-
+        print("train loss = ", train_loss_sum / train_loss_times)
         self.scheduler.step()
 
     def train(self):
@@ -144,6 +149,8 @@ class Trainer:
     def validate(self):
         self.net.eval()  # set model to eval mode (for bn and dp)
         iou_calc = IoUCalculator(cfg)
+        loss_sum = 0
+        loss_times = 0
 
         tqdm_loader = tqdm(self.val_loader, total=len(self.val_loader))
         with torch.no_grad():
@@ -160,10 +167,12 @@ class Trainer:
                 end_points = self.net(batch_data)
 
                 loss, end_points = compute_loss(end_points, self.train_dataset, self.criterion)
-
+                # print("val loss = ", loss)
+                loss_sum += loss.item()
+                loss_times += 1
                 acc, end_points = compute_acc(end_points)
                 iou_calc.add_data(end_points)
-
+        print("val loss = ", loss_sum / loss_times)
         mean_iou, iou_list = iou_calc.compute_iou()
         self.logger.info('mean IoU:{:.1f}'.format(mean_iou * 100))
         s = 'IoU:'
